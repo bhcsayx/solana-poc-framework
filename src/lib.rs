@@ -33,8 +33,13 @@ use solana_runtime::{
     accounts_db::AccountShrinkThreshold,
     accounts_index::AccountSecondaryIndexes,
     bank::{
-        Bank, Builtin, Builtins, NonceRollbackInfo, TransactionBalancesSet,
+        Bank, TransactionBalancesSet,
         TransactionResults,
+        TransactionExecutionResult,
+        InnerInstructionsList,
+    },
+    builtins::{
+        Builtin, Builtins,
     },
     genesis_utils,
 };
@@ -46,11 +51,13 @@ use solana_sdk::{
     signature::Keypair,
     signature::Signer,
     system_transaction,
-    transaction::Transaction,
+    transaction::{Transaction, TransactionError},
 };
 use solana_transaction_status::{
-    token_balances, ConfirmedTransaction, EncodedConfirmedTransaction, InnerInstructions,
-    TransactionStatusMeta, TransactionWithStatusMeta, UiTransactionEncoding,
+    token_balances, ConfirmedTransaction, EncodedConfirmedTransaction,
+    TransactionWithOptionalMetadata, UiTransactionEncoding, UiTransactionStatusMeta,
+    ConfirmedTransactionWithOptionalMetadata, EncodedTransaction, EncodedTransactionWithStatusMeta,
+    UiTransactionTokenBalance, UiInnerInstructions, InnerInstructions,
 };
 use spl_associated_token_account::get_associated_token_address;
 use tempfile::TempDir;
@@ -363,11 +370,23 @@ impl Environment for LocalEnvironment {
             )
         }
         let txs = vec![tx];
-
-        let batch = self.bank.prepare_batch(txs.iter());
+        let mut length = txs.len().clone();
+        // let batch = self.bank.prepare_batch(txs.iter());
+        let batch = self.bank.prepare_batch_for_tests(txs);
         let mut mint_decimals = HashMap::new();
         let tx_pre_token_balances =
             token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
+        let mut tx_pre_token_balances_encoded: Vec<Vec<UiTransactionTokenBalance>> = 
+            Vec::with_capacity(tx_pre_token_balances.len());
+        for balance_iter in tx_pre_token_balances.into_iter() {
+            let mut tmp_balance: Vec<UiTransactionTokenBalance> = 
+            Vec::with_capacity(balance_iter.len());
+            for balance_iter2 in balance_iter.into_iter() {
+                tmp_balance.push(UiTransactionTokenBalance::from(balance_iter2.clone()));
+            }
+            tx_pre_token_balances_encoded.push(tmp_balance);
+        }
+
         let slot = self.bank.slot();
         let mut timings = Default::default();
         let (
@@ -379,8 +398,8 @@ impl Environment for LocalEnvironment {
                 post_balances,
                 ..
             },
-            inner_instructions,
-            transaction_logs,
+            // inner_instructions,
+            // transaction_logs,
         ) = self.bank.load_execute_and_commit_transactions(
             &batch,
             std::usize::MAX,
@@ -390,64 +409,166 @@ impl Environment for LocalEnvironment {
             &mut timings,
         );
 
+        let mut inner_instructions: Vec<Option<InnerInstructionsList>> =
+            Vec::with_capacity(length);
+        let mut transaction_logs: Vec<Option<Vec<String>>> =
+            Vec::with_capacity(length);
+        let mut transaction_errs: Vec<Option<TransactionError>> = 
+            Vec::with_capacity(length);
+        let mut execution_status: Vec<Result<(), TransactionError>> = 
+            Vec::with_capacity(length);
+
+        for exec_res in execution_results.into_iter() {
+            match exec_res {
+                TransactionExecutionResult::NotExecuted(e) => {
+                    inner_instructions.push(None);
+                    transaction_logs.push(None);
+                    transaction_errs.push(serde::__private::Some(e.clone()));
+                    execution_status.push(serde::__private::Err(e.clone()));
+                }
+
+                TransactionExecutionResult::Executed(details) => {
+                    inner_instructions.push(details.inner_instructions.clone());
+                    transaction_logs.push(details.log_messages.clone());
+                    transaction_errs.push(None);
+                    execution_status.push(details.status.clone());
+                }
+            }
+        }
+
+        let mut inner_instructions_encoded: Vec<Option<Vec<UiInnerInstructions>>> =
+        Vec::with_capacity(length);
+        for inner_instruction_option in inner_instructions.into_iter() {
+            match inner_instruction_option {
+                Some(inner_instruction_list) => {
+                    let mut tmp_instructions: Vec<UiInnerInstructions> = 
+                    Vec::with_capacity(inner_instruction_list.len());
+                    let mut instruction_index: u8 = 0;
+                    for inner_instruction in inner_instruction_list.into_iter() {
+                        tmp_instructions.push(UiInnerInstructions::from(InnerInstructions{
+                            index: instruction_index,
+                            instructions: inner_instruction.clone(),
+                        }));
+                        instruction_index = instruction_index + 1;
+                    }
+                    inner_instructions_encoded.push(Some(tmp_instructions));
+                }
+                
+                None => {
+                    inner_instructions_encoded.push(None);
+                }
+            }
+        }
+
         let tx_post_token_balances =
             token_balances::collect_token_balances(&self.bank, &batch, &mut mint_decimals);
+        let mut tx_post_token_balances_encoded: Vec<Vec<UiTransactionTokenBalance>> = 
+            Vec::with_capacity(tx_post_token_balances.len());
+        for balance_iter in tx_post_token_balances.into_iter() {
+            let mut tmp_balance: Vec<UiTransactionTokenBalance> = 
+            Vec::with_capacity(balance_iter.len());
+            for balance_iter2 in balance_iter.into_iter() {
+                tmp_balance.push(UiTransactionTokenBalance::from(balance_iter2.clone()));
+            }
+            tx_post_token_balances_encoded.push(tmp_balance);
+        }
+
         izip!(
-            txs.iter(),
-            execution_results.into_iter(),
-            inner_instructions.into_iter(),
+            // txs.clone().iter(),
+            execution_status.into_iter(),
+            // inner_instructions.into_iter(),
+            inner_instructions_encoded.into_iter(),
             pre_balances.into_iter(),
             post_balances.into_iter(),
-            tx_pre_token_balances.into_iter(),
-            tx_post_token_balances.into_iter(),
+            // tx_pre_token_balances.clone().into_iter(),
+            // tx_post_token_balances.clone().into_iter(),
+            tx_pre_token_balances_encoded.into_iter(),
+            tx_post_token_balances_encoded.into_iter(),
             transaction_logs.into_iter(),
+            transaction_errs.into_iter(),
         )
         .map(
             |(
-                tx,
-                (execute_result, nonce_rollback),
-                inner_instructions,
+                // tx,
+                exec_status,
+                // execute_results,
+                // inner_instructions,
+                inner_instructions_encoded,
                 pre_balances,
                 post_balances,
-                pre_token_balances,
-                post_token_balances,
+                // pre_token_balances,
+                // post_token_balances,
+                pre_token_balances_encoded,
+                post_token_balances_encoded,
                 log_messages,
+                err_messages,
             )| {
-                let fee_calculator = nonce_rollback
-                    .map(|nonce_rollback| nonce_rollback.fee_calculator())
-                    .unwrap_or_else(|| self.bank.get_fee_calculator(&tx.message().recent_blockhash))
-                    .expect("FeeCalculator must exist");
-                let fee = fee_calculator.calculate_fee(tx.message());
+                // let fee_calculator = nonce_rollback
+                //     .map(|nonce_rollback| nonce_rollback.fee_calculator())
+                //     .unwrap_or_else(|| self.bank.get_fee_calculator(&tx.message().recent_blockhash))
+                //     .expect("FeeCalculator must exist");
+                // let fee = Bank::calculate_fee(tx, 1, &self.bank.fee_structure, false);
+                let fee = 0;
 
-                let inner_instructions = inner_instructions.map(|inner_instructions| {
-                    inner_instructions
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, instructions)| InnerInstructions {
-                            index: index as u8,
-                            instructions,
-                        })
-                        .filter(|i| !i.instructions.is_empty())
-                        .collect()
-                });
+                // let inner_instructions = inner_instructions.map(|inner_instructions| {
+                //     inner_instructions
+                //         .into_iter()
+                //         .enumerate()
+                //         .map(|(index, instructions)| InnerInstructions {
+                //             index: index as u8,
+                //             instructions,
+                //         })
+                //         .filter(|i| !i.instructions.is_empty())
+                //         .collect()
+                // });
 
-                let tx_status_meta = TransactionStatusMeta {
-                    status: execute_result,
+                // let tx_status_meta = TransactionStatusMeta {
+                //     status: execute_result,
+                //     fee,
+                //     pre_balances,
+                //     post_balances,
+                //     pre_token_balances: Some(pre_token_balances),
+                //     post_token_balances: Some(post_token_balances),
+                //     inner_instructions,
+                //     log_messages,
+                //     rewards: None,
+                // };
+
+                let tx_status_meta = UiTransactionStatusMeta{
+                    err: err_messages,
+                    status: exec_status,
                     fee,
                     pre_balances,
                     post_balances,
-                    pre_token_balances: Some(pre_token_balances),
-                    post_token_balances: Some(post_token_balances),
-                    inner_instructions,
+                    pre_token_balances: Some(pre_token_balances_encoded),
+                    post_token_balances: Some(post_token_balances_encoded),
+                    inner_instructions: inner_instructions_encoded,
                     log_messages,
                     rewards: None,
                 };
 
-                ConfirmedTransaction {
+                // ConfirmedTransaction {
+                //     slot,
+                //     transaction: TransactionWithMetadata {
+                //         transaction: tx.clone(),
+                //         meta: tx_status_meta,
+                //     },
+                //     block_time: Some(
+                //         SystemTime::now()
+                //             .duration_since(UNIX_EPOCH)
+                //             .unwrap()
+                //             .as_secs()
+                //             .try_into()
+                //             .unwrap(),
+                //     ),
+                // }
+                // .encode(UiTransactionEncoding::Binary)
+
+                EncodedConfirmedTransaction {
                     slot,
-                    transaction: TransactionWithStatusMeta {
-                        transaction: tx.clone(),
-                        meta: Some(tx_status_meta),
+                    transaction: EncodedTransactionWithStatusMeta {
+                        transaction: EncodedTransaction::Binary(String::new(), UiTransactionEncoding::Binary),
+                        meta: serde::__private::Some(tx_status_meta),
                     },
                     block_time: Some(
                         SystemTime::now()
@@ -458,7 +579,6 @@ impl Environment for LocalEnvironment {
                             .unwrap(),
                     ),
                 }
-                .encode(UiTransactionEncoding::Binary)
             },
         )
         .next().expect("transaction could not be executed. Enable debug logging to get more information on why")
@@ -710,7 +830,6 @@ impl LocalEnvironmentBuilder {
         let bank = Bank::new_with_paths(
             &self.config,
             vec![tmpdir.to_path_buf()],
-            &[],
             None,
             Some(&Builtins {
                 genesis_builtins: [
@@ -721,7 +840,7 @@ impl LocalEnvironmentBuilder {
                 .iter()
                 .map(|p| Builtin::new(&p.0, p.1, p.2))
                 .collect(),
-                feature_builtins: vec![],
+                feature_transitions: vec![],
             }),
             AccountSecondaryIndexes {
                 keys: None,
@@ -730,6 +849,7 @@ impl LocalEnvironmentBuilder {
             false,
             AccountShrinkThreshold::default(),
             false,
+            None,
             None,
         );
         LocalEnvironment {
@@ -830,14 +950,22 @@ pub trait PrintableTransaction {
 impl PrintableTransaction for ConfirmedTransaction {
     fn print_named(&self, name: &str) {
         let tx = self.transaction.transaction.clone();
-        let encoded = self.clone().encode(UiTransactionEncoding::JsonParsed);
+        let encoded = ConfirmedTransactionWithOptionalMetadata {
+            slot: self.slot.clone(),
+            transaction: TransactionWithOptionalMetadata {
+                transaction: self.transaction.transaction.clone(),
+                meta: Some(self.transaction.meta.clone()),
+            },
+            block_time: self.block_time,
+        }.encode(UiTransactionEncoding::JsonParsed);
+        // let encoded = self.clone().encode(UiTransactionEncoding::JsonParsed);
         println!("EXECUTE {} (slot {})", name, encoded.slot);
         println_transaction(&tx, &encoded.transaction.meta, "  ", None, None);
     }
 
     fn assert_success(&self) {
         match &self.transaction.meta {
-            Some(meta) if meta.status.is_err() => {
+            meta if meta.status.is_err() => {
                 self.print();
                 panic!("tx failed!")
             },
