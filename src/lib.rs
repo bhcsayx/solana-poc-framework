@@ -55,9 +55,10 @@ use solana_sdk::{
 };
 use solana_transaction_status::{
     token_balances, ConfirmedTransaction, EncodedConfirmedTransaction,
-    TransactionWithOptionalMetadata, UiTransactionEncoding, UiTransactionStatusMeta,
-    ConfirmedTransactionWithOptionalMetadata, EncodedTransaction, EncodedTransactionWithStatusMeta,
+    UiTransactionEncoding, UiTransactionStatusMeta,
+    EncodedTransaction, EncodedTransactionWithStatusMeta,
     UiTransactionTokenBalance, UiInnerInstructions, InnerInstructions,
+    // TransactionWithOptionalMetadata, ConfirmedTransactionWithOptionalMetadata,
 };
 use spl_associated_token_account::get_associated_token_address;
 use tempfile::TempDir;
@@ -840,7 +841,7 @@ impl LocalEnvironmentBuilder {
                 .iter()
                 .map(|p| Builtin::new(&p.0, p.1, p.2))
                 .collect(),
-                feature_transitions: vec![],
+                feature_builtins: vec![],
             }),
             AccountSecondaryIndexes {
                 keys: None,
@@ -950,22 +951,22 @@ pub trait PrintableTransaction {
 impl PrintableTransaction for ConfirmedTransaction {
     fn print_named(&self, name: &str) {
         let tx = self.transaction.transaction.clone();
-        let encoded = ConfirmedTransactionWithOptionalMetadata {
-            slot: self.slot.clone(),
-            transaction: TransactionWithOptionalMetadata {
-                transaction: self.transaction.transaction.clone(),
-                meta: Some(self.transaction.meta.clone()),
-            },
-            block_time: self.block_time,
-        }.encode(UiTransactionEncoding::JsonParsed);
-        // let encoded = self.clone().encode(UiTransactionEncoding::JsonParsed);
+        // let encoded = ConfirmedTransactionWithOptionalMetadata {
+        //     slot: self.slot.clone(),
+        //     transaction: TransactionWithOptionalMetadata {
+        //         transaction: self.transaction.transaction.clone(),
+        //         meta: Some(self.transaction.meta.clone()),
+        //     },
+        //     block_time: self.block_time,
+        // }.encode(UiTransactionEncoding::JsonParsed);
+        let encoded = self.clone().encode(UiTransactionEncoding::JsonParsed);
         println!("EXECUTE {} (slot {})", name, encoded.slot);
         println_transaction(&tx, &encoded.transaction.meta, "  ", None, None);
     }
 
     fn assert_success(&self) {
         match &self.transaction.meta {
-            meta if meta.status.is_err() => {
+            Some(meta) if meta.status.is_err() => {
                 self.print();
                 panic!("tx failed!")
             },
